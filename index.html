@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dark Chronicle: Grimoire of Elements</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚔️</text></svg>">
+  <link rel="stylesheet" href="./src/style.css">
+</head>
+<body>
+  <!-- Global App Header -->
+  <header id="app-header">
+    <div class="brand-section">
+      <div class="brand-logo">⚔️</div>
+      <div>
+        <div class="brand-title">DARK CHRONICLE</div>
+        <div class="brand-subtitle">Grimoire of Elements • Tactics RPG</div>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <nav class="nav-tabs">
+      <button class="tab-btn active" id="tab-combat" data-view="view-combat">
+        <span>⚔️</span> Tactics Combat
+      </button>
+      <button class="tab-btn" id="tab-worldmap" data-view="view-worldmap">
+        <span>🗺️</span> World Map
+      </button>
+      <button class="tab-btn" id="tab-story" data-view="view-story">
+        <span>📜</span> Story & Dialogue
+      </button>
+      <button class="tab-btn" id="tab-inventory" data-view="view-inventory">
+        <span>🎒</span> Character & Gear
+      </button>
+    </nav>
+
+    <!-- Top Right Currency & Audio -->
+    <div class="header-status">
+      <div class="gold-counter">
+        <span>💰</span> <span id="header-gold">1,250 G</span>
+      </div>
+      <button class="audio-toggle-btn" id="btn-audio-toggle">🔊 Sound ON</button>
+    </div>
+  </header>
+
+  <!-- Main Viewport Panes -->
+  <main id="main-container">
+
+    <!-- 1. COMBAT VIEW PANE -->
+    <section class="view-pane active" id="view-combat">
+      <div class="combat-layout">
+        <!-- Top Bar info -->
+        <div class="combat-top-bar">
+          <div class="turn-counter-badge">
+            <span class="turn-num" id="combat-turn-num">TURN 1</span>
+            <span class="turn-phase" id="combat-phase-text">PLAYER PHASE</span>
+          </div>
+
+          <!-- Target Info card (Top Right) -->
+          <div class="target-info-card" id="combat-target-card">
+            <div class="target-portrait" id="target-portrait-slot"></div>
+            <div class="target-meta">
+              <div class="target-name" id="target-name-text">Goblin Huntress</div>
+              <div class="target-sub" id="target-sub-text">Lv. 3 • Scout</div>
+              <div class="bar-track">
+                <div class="bar-fill-hp" id="target-hp-bar" style="width: 100%;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Left Vertical Turn Order Queue -->
+        <div class="turn-queue-strip" id="turn-queue-strip">
+          <!-- Populated by JS -->
+        </div>
+
+        <!-- Isometric Tactics Canvas -->
+        <canvas id="combat-canvas" width="1100" height="640"></canvas>
+
+        <!-- Combat HUD Bottom Controls -->
+        <div class="combat-hud-bottom">
+          <!-- Active Hero Unit Card (Bottom Left) -->
+          <div class="active-unit-card" id="active-unit-card">
+            <div class="hero-portrait-frame" id="hero-portrait-slot"></div>
+            <div class="hero-stats-info">
+              <div class="hero-name-row">
+                <span class="hero-name" id="hero-name-text">Arza</span>
+                <span class="hero-lvl" id="hero-lvl-text">Lv. 5</span>
+              </div>
+              <div class="bar-track">
+                <div class="bar-fill-hp" id="hero-hp-bar" style="width: 100%;"></div>
+              </div>
+              <div class="bar-label-text">
+                <span>HP</span> <span id="hero-hp-text">82 / 82</span>
+              </div>
+              <div class="bar-track" style="margin-top: 4px;">
+                <div class="bar-fill-mp" id="hero-mp-bar" style="width: 100%;"></div>
+              </div>
+              <div class="bar-label-text">
+                <span>MP</span> <span id="hero-mp-text">24 / 24</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Actions & Hotbar (Bottom Center) -->
+          <div class="actions-center-container">
+            <!-- Action Menu Modal -->
+            <div class="action-menu-row">
+              <button class="btn-tactics active" id="btn-mode-move">🚶 Move</button>
+              <button class="btn-tactics" id="btn-mode-attack">⚔️ Attack</button>
+              <button class="btn-tactics" id="btn-mode-skill">✨ Skill</button>
+              <button class="btn-tactics btn-end-turn" id="btn-end-turn">🛡️ Wait / End</button>
+            </div>
+
+            <!-- 4-Slot Skill Hotbar -->
+            <div class="skill-hotbar" id="skill-hotbar">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 2. WORLD MAP PANE -->
+    <section class="view-pane" id="view-worldmap">
+      <div class="map-view-layout">
+        <canvas id="world-map-canvas" width="1100" height="640"></canvas>
+
+        <!-- Floating Location Info Inspector (Top Left) -->
+        <div class="map-floating-overlay" id="map-inspector">
+          <div class="map-location-title" id="map-node-title">Ravenhold Capital</div>
+          <div class="map-location-th" id="map-node-th">นครหลวงเรเวนโฮลด์</div>
+          <div class="map-location-desc" id="map-node-desc">
+            ศูนย์กลางแห่งอาณาจักร กองบัญชาการอัศวินหญิงแห่งแสงสุริยา
+          </div>
+          <button class="btn-enter-stage" id="btn-map-action">⚔️ Enter Area / Skirmish</button>
+        </div>
+
+        <!-- Legend box (Bottom Left) -->
+        <div class="map-legend-box">
+          <span>🔵 Current Position</span>
+          <span>⭐ Capital</span>
+          <span>🔮 Ancient Ruins</span>
+          <span>💎 Abyssal Dungeon</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 3. STORY / DIALOGUE PANE -->
+    <section class="view-pane" id="view-story">
+      <div id="dialogue-container">
+        <!-- Dialogue box rendered by DialogueView -->
+      </div>
+    </section>
+
+    <!-- 4. INVENTORY / CHARACTER SHEET PANE -->
+    <section class="view-pane" id="view-inventory">
+      <div id="inventory-container">
+        <!-- Paper doll & Inventory rendered by InventoryView -->
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Victory Modal -->
+  <div class="modal-overlay" id="victory-modal" style="display: none;">
+    <div class="modal-content">
+      <div class="modal-title">🏆 VICTORY!</div>
+      <div class="modal-desc">
+        คุณกำจัดศัตรูทั้งหมดสำเร็จ ได้รับ <strong>+350 Gold</strong> และไอเทมเวทมนตร์โบราณ!
+      </div>
+      <button class="modal-btn" id="btn-claim-victory">Continue Adventure</button>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

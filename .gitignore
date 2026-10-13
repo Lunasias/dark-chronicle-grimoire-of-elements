@@ -1,0 +1,16 @@
+node_modules
+dist
+.vercel
+*.log
+.DS_Store
+mockup.html
+mockup_preview.png
+combat_1280.png
+combat_preview_live.png
+combat_screenshot.png
+inventory_live.png
+inventory_screenshot.png
+story_live.png
+story_screenshot.png
+worldmap_live.png
+worldmap_screenshot.png
