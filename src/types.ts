@@ -17,8 +17,11 @@ export interface Unit {
   gridY: number;
   portraitKey: string;
   color: string;
+  element?: Skill['element'];
   skills: Skill[];
   isDead?: boolean;
+  xp?: number;
+  baseStats?: { atk: number; def: number; spd: number; matk: number; maxHp: number; maxMp: number };
 }
 
 export interface Skill {
@@ -29,7 +32,7 @@ export interface Skill {
   range: number;
   type: 'damage' | 'heal' | 'buff';
   power: number;
-  element: 'physical' | 'fire' | 'holy' | 'wind' | 'shadow';
+  element: 'physical' | 'fire' | 'ice' | 'holy' | 'wind' | 'shadow';
   icon: string;
   description: string;
 }
@@ -49,6 +52,8 @@ export interface Item {
   icon: string;
   desc: string;
   equipped?: boolean;
+  equippedBy?: string;
+  restoreMp?: number;
 }
 
 export interface WorldNode {

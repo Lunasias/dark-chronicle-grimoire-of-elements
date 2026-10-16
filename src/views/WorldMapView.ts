@@ -14,6 +14,18 @@ export class WorldMapView {
   private isTraveling: boolean = false;
   private onNodeSelected?: (node: WorldNode) => void;
   private onStartBattle?: (node: WorldNode) => void;
+  private accessChecker?: (id: string) => { allowed: boolean; reason: string };
+  private lastMessage = '';
+
+  public setAccessChecker(checker: (id: string) => { allowed: boolean; reason: string }) { this.accessChecker = checker; }
+  public getMessage() { return this.lastMessage; }
+  public setCurrentNode(id: string) {
+    const node = this.nodes.find(n => n.id === id);
+    if (!node) return;
+    this.currentNodeId = id; this.selectedNodeId = id;
+    this.partyPos = { x: node.x, y: node.y }; this.targetPos = { ...this.partyPos };
+    this.isTraveling = false; this.canvas.dataset.traveling = 'false';
+  }
 
   constructor(canvas: HTMLCanvasElement, onNodeSelected?: (node: WorldNode) => void, onStartBattle?: (node: WorldNode) => void) {
     this.canvas = canvas;
@@ -24,6 +36,7 @@ export class WorldMapView {
     const startNode = this.nodes.find(n => n.id === this.currentNodeId)!;
     this.partyPos = { x: startNode.x, y: startNode.y };
     this.targetPos = { x: startNode.x, y: startNode.y };
+    this.canvas.dataset.traveling = 'false';
 
     this.setupEvents();
     this.animate();
@@ -40,17 +53,25 @@ export class WorldMapView {
   public travelTo(nodeId: string) {
     const target = this.nodes.find(n => n.id === nodeId);
     if (!target || this.isTraveling) return;
+    const access = this.accessChecker?.(nodeId);
+    if (access && !access.allowed) {
+      this.lastMessage = access.reason;
+      this.selectedNodeId = nodeId;
+      this.onNodeSelected?.(target);
+      return;
+    }
+    this.lastMessage = '';
 
     sounds.playClick();
     this.selectedNodeId = nodeId;
     this.targetPos = { x: target.x, y: target.y };
-    this.isTraveling = true;
+    this.isTraveling = true; this.canvas.dataset.traveling = 'true';
     this.currentNodeId = nodeId;
     this.onNodeSelected?.(target);
   }
 
   private setupEvents() {
-    this.canvas.addEventListener('mousemove', (e) => {
+    this.canvas.addEventListener('pointermove', (e) => {
       const rect = this.canvas.getBoundingClientRect();
       const scaleX = this.canvas.width / rect.width;
       const scaleY = this.canvas.height / rect.height;
@@ -72,8 +93,11 @@ export class WorldMapView {
     });
 
     this.canvas.addEventListener('click', (e) => {
-      if (this.isTraveling || !this.hoveredNodeId) return;
-      const clicked = this.nodes.find(n => n.id === this.hoveredNodeId);
+      if (this.isTraveling) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * this.canvas.width / rect.width;
+      const my = (e.clientY - rect.top) * this.canvas.height / rect.height;
+      const clicked = this.nodes.find(n => Math.hypot(mx - n.x / 100 * this.canvas.width, my - n.y / 100 * this.canvas.height) <= 30);
       if (clicked) {
         this.travelTo(clicked.id);
       }
@@ -183,7 +207,8 @@ export class WorldMapView {
       // Outer node ring
       this.ctx.beginPath();
       this.ctx.arc(nx, ny, 18, 0, Math.PI * 2);
-      this.ctx.fillStyle = isSelected ? '#0284c7' : '#1e293b';
+      const locked = this.accessChecker && !this.accessChecker(node.id).allowed && node.id !== this.currentNodeId;
+      this.ctx.fillStyle = isSelected ? '#0284c7' : locked ? '#282333' : '#1e293b';
       this.ctx.fill();
       this.ctx.strokeStyle = isSelected ? '#38bdf8' : (isHovered ? '#fbbf24' : '#64748b');
       this.ctx.lineWidth = 2.5;
@@ -193,7 +218,7 @@ export class WorldMapView {
       this.ctx.font = '16px "Segoe UI Emoji", sans-serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'middle';
-      this.ctx.fillText(node.icon, nx, ny);
+      this.ctx.fillText(locked ? '🔒' : node.icon, nx, ny);
 
       // Name banner below node
       this.ctx.font = 'bold 12px "Segoe UI", sans-serif';
@@ -229,6 +254,10 @@ export class WorldMapView {
   }
 
   private animate = () => {
+    if (this.canvas.clientWidth > 0 && this.canvas.clientHeight > 0) {
+      if (this.canvas.width !== this.canvas.clientWidth) this.canvas.width = this.canvas.clientWidth;
+      if (this.canvas.height !== this.canvas.clientHeight) this.canvas.height = this.canvas.clientHeight;
+    }
     // Travel interpolation
     if (this.isTraveling) {
       const dx = this.targetPos.x - this.partyPos.x;
@@ -238,7 +267,7 @@ export class WorldMapView {
       if (dist < 0.8) {
         this.partyPos.x = this.targetPos.x;
         this.partyPos.y = this.targetPos.y;
-        this.isTraveling = false;
+        this.isTraveling = false; this.canvas.dataset.traveling = 'false';
         sounds.playClick();
       } else {
         this.partyPos.x += (dx / dist) * 0.9;

@@ -54,7 +54,7 @@ export const INITIAL_ITEMS: Item[] = [
     name: 'Mana Crystal Vial',
     type: 'consumable',
     rarity: 'common',
-    healAmount: 30,
+    restoreMp: 30,
     icon: '🔷',
     desc: 'ยาฟื้นฟูพลังเวทมนตร์ 30 MP'
   },

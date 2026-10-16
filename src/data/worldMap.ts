@@ -76,7 +76,7 @@ export const WORLD_NODES: WorldNode[] = [
     biome: 'swamp',
     levelReq: 3,
     description: 'บึงพรายมืดมิด เต็มไปด้วยไอพิษและเหล่าแม่มดนอกรีต',
-    connectedTo: ['ravenhold', 'silverport', 'ironwall'],
+    connectedTo: ['ravenhold', 'silverport', 'dunes'],
     type: 'swamp'
   },
   {
@@ -89,7 +89,7 @@ export const WORLD_NODES: WorldNode[] = [
     biome: 'dunes',
     levelReq: 5,
     description: 'ทะเลทรายแผดเผา ซากอารยธรรมเก่าที่ถูกกลบฝังใต้ผืนทราย',
-    connectedTo: ['ruins', 'ironwall'],
+    connectedTo: ['ruins', 'swamp'],
     type: 'dunes'
   },
   {

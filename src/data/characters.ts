@@ -111,7 +111,7 @@ export const INITIAL_PARTY: Unit[] = [
         range: 3,
         type: 'damage',
         power: 34,
-        element: 'fire',
+        element: 'ice',
         icon: '❄️',
         description: 'ควบแน่นเวทเยือกแข็งยิงทะลวงเกราะ'
       },

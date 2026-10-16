@@ -1,513 +1,190 @@
-import { Unit, Skill } from '../types';
-import { sounds } from '../audio';
-import { getPortraitSVG } from '../portraits';
+import type {Unit, Skill} from '../types';
+import {BattleEngine, type Point} from '../combat';
+import {drawFighter, type SpriteState} from '../combat-art';
+import {sounds} from '../audio';
 
+type Mode='move'|'attack'|'skill'|'idle';
+type Motion={kind:SpriteState;start:number;duration:number;from?:Point;path?:Point[]};
+type Float={x:number;y:number;text:string;color:string;start:number};
+/** Canvas presentation; BattleEngine owns the timer-free deterministic rules. */
 export class CombatView {
-  private canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
-  private units: Unit[] = [];
-  private activeUnitIndex: number = 0;
-  private selectedSkill: Skill | null = null;
-  private actionMode: 'move' | 'attack' | 'skill' | 'idle' = 'move';
-  private hoveredTile: { x: number; y: number } = { x: -1, y: -1 };
-  private hoveredUnit: Unit | null = null;
-  private targetUnit: Unit | null = null;
-  private turnCount: number = 1;
-  private isEnemyTurn: boolean = false;
-  private floatingTexts: Array<{ x: number; y: number; text: string; color: string; alpha: number }> = [];
-
-  // Isometric constants
-  private readonly GRID_SIZE = 8;
-  private readonly TILE_W = 68;
-  private readonly TILE_H = 34;
-  private originX = 410;
-  private originY = 120;
-
-  // Map terrain: 0: Cobblestone, 1: Water/Channel, 2: Ruin Pillar, 3: Mystic Seal
-  private mapGrid: number[][] = [
-    [0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 2, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 1, 1, 0, 0],
-    [0, 2, 0, 0, 1, 1, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 2, 0, 3, 2, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0],
-    [0, 0, 0, 0, 0, 0, 0, 0]
-  ];
-
-  private onStateChange?: () => void;
-  private onVictory?: () => void;
-
-  constructor(canvas: HTMLCanvasElement, initialUnits: Unit[], onStateChange?: () => void, onVictory?: () => void) {
-    this.canvas = canvas;
-    this.ctx = canvas.getContext('2d')!;
-    this.units = JSON.parse(JSON.stringify(initialUnits));
-    this.targetUnit = this.units.find(u => !u.isPlayer) || null;
-    this.onStateChange = onStateChange;
-    this.onVictory = onVictory;
-
-    this.setupEvents();
-    this.selectedSkill = this.getActiveUnit()?.skills[0] || null;
-    this.animate();
+ private ctx:CanvasRenderingContext2D;
+ private engine:BattleEngine;
+ private actionMode:Mode='move';
+ private selectedSkill:Skill|null=null;
+ private hoveredTile:Point={x:-1,y:-1};
+ private targetId:string|null=null;
+ private timers=new Set<ReturnType<typeof setTimeout>>();
+ private generation=0;
+ private frame=0;
+ private destroyed=false;
+ private terminalHandled=false;
+ private motions=new Map<string,Motion[]>();
+ private floats:Float[]=[];
+ private effects:{from:Point;to:Point;color:string;start:number;magic:boolean}[]=[];
+ private originX=550;private originY=130;private tileW=96;private tileH=48;
+ private listeners:{type:string;handler:EventListener}[]=[];
+ constructor(private canvas:HTMLCanvasElement,initialUnits:Unit[],private onStateChange?:()=>void,private onVictory?:()=>void,private onDefeat?:()=>void){
+  const ctx=canvas.getContext('2d');if(!ctx)throw new Error('Canvas 2D rendering is unavailable.');this.ctx=ctx;
+  this.engine=new BattleEngine(initialUnits);this.selectedSkill=this.getActiveUnit()?.skills[0]??null;
+  this.canvas.style.touchAction='none';this.canvas.tabIndex=0;
+  this.canvas.setAttribute?.('aria-label','Tactical battlefield. Tap blue tiles to move, choose Attack or a skill, then tap a target.');
+  this.setupEvents();this.animate();if(this.engine.status!=='active')this.changed();
+ }
+ public getActiveUnit():Unit|null{return this.engine.active;}
+ public getAllUnits():Unit[]{return this.engine.units;}
+ public getTargetUnit():Unit|null{return this.engine.alive.find(u=>u.id===this.targetId)??this.unitAt(this.hoveredTile)??null;}
+ public getTurnCount(){return this.engine.round;}
+ public getIsEnemyTurn(){return this.engine.phase==='enemy'&&this.engine.status==='active';}
+ public getSelectedSkill(){return this.selectedSkill;}
+ public getActionMode(){return this.actionMode;}
+ public getActionStatus(){return {...this.engine.action};}
+ public getMessage(){return this.engine.message;}
+ public getLog(){return this.engine.log.slice();}
+ public getBattleStatus(){return this.engine.status;}
+ public getPreview():string{
+  if(this.engine.status!=='active')return this.engine.status==='victory'?'Victory — battle complete.':'Defeat — return to regroup.';
+  if(this.getIsEnemyTurn())return this.engine.telegraphs.length?'Danger: evacuate the marked tiles before the next enemy phase.':'Enemy phase — planning a response…';
+  const u=this.getActiveUnit();if(!u)return 'No living party members.';
+  if(this.actionMode==='move'){
+   if(this.engine.action.moved)return 'Movement used. Choose an action or end this unit turn.';
+   const path=this.engine.path(u,this.hoveredTile.x,this.hoveredTile.y,this.engine.moveRange(u));
+   return path?.length?`Move ${path.length}/${this.engine.moveRange(u)} tiles • one move per unit turn`:'Tap a blue tile. Water, pillars and living units block paths.';
   }
-
-  public getActiveUnit(): Unit | null {
-    const living = this.units.filter(u => !u.isDead && u.isPlayer);
-    return living[this.activeUnitIndex % living.length] || null;
+  if(this.actionMode==='idle')return 'Choose Move, Basic Attack, a skill, or End Turn.';
+  if(this.engine.action.acted)return 'Action used. You may still move if movement is unused.';
+  const target=this.unitAt(this.hoveredTile)??this.getTargetUnit();
+  return target?this.engine.preview(target.id,this.actionMode==='skill'?this.selectedSkill??undefined:undefined):'Tap a living target to preview damage, cost and affinity.';
+ }
+ public setMode(mode:Mode,skill?:Skill){
+  if(this.destroyed)return;this.actionMode=mode;if(skill)this.selectedSkill=this.getActiveUnit()?.skills.find(s=>s.id===skill.id)??null;
+  this.engine.message=mode==='move'?'Select a reachable blue tile.':mode==='attack'?'Basic attack: free, physical, adjacent enemy.':mode==='skill'?`${this.selectedSkill?.name??'Select a skill'}: ${this.selectedSkill?.range===0?'tap your own tile.':'tap a valid target.'}`:'Choose your next command.';
+  this.sound('playClick');this.onStateChange?.();
+ }
+ /** Resumes a previously destroyed/retreated view with the retained terrain. */
+ public resetBattle(newUnits:Unit[]){
+  this.cancelTimers();this.engine=new BattleEngine(newUnits,this.engine.grid);this.actionMode='move';this.selectedSkill=this.getActiveUnit()?.skills[0]??null;this.targetId=null;this.hoveredTile={x:-1,y:-1};this.terminalHandled=false;this.motions.clear();this.effects=[];this.floats=[];
+  if(this.destroyed){this.destroyed=false;this.setupEvents();this.animate();}this.changed();
+ }
+ /** Copies terrain; 0/3 walkable, 1 water, 2 pillar. resetBattle retains it. */
+ public setMap(grid:number[][]){
+  if(!grid.length||!grid[0].length||grid.some(row=>row.length!==grid[0].length||row.some(v=>![0,1,2,3].includes(v)))){this.engine.result(false,'Invalid battlefield terrain.');this.onStateChange?.();return;}
+  if(grid.flat().filter(v=>v===0||v===3).length<this.engine.alive.length){this.engine.result(false,'Not enough legal spawn tiles.');this.onStateChange?.();return;}
+  this.cancelTimers();this.engine.grid=grid.map(row=>row.slice());this.engine.placeUnits();this.engine.telegraphs=[];this.motions.clear();this.hoveredTile={x:-1,y:-1};this.onStateChange?.();if(!this.destroyed&&this.getIsEnemyTurn())this.scheduleEnemies();
+ }
+ public endTurn(){
+  if(this.destroyed||this.getIsEnemyTurn()||this.engine.status!=='active')return;
+  this.transition(()=>this.engine.endTurn());this.actionMode='move';this.selectedSkill=this.getActiveUnit()?.skills[0]??null;this.targetId=null;
+  if(this.engine.status==='active')this.engine.message=this.getIsEnemyTurn()?'Enemy phase.':`${this.getActiveUnit()?.name??'Party'}: one move and one action available.`;
+  this.sound('playClick');this.changed();if(this.getIsEnemyTurn())this.scheduleEnemies();
+ }
+ public destroy(){if(this.destroyed)return;this.destroyed=true;this.cancelTimers();cancelAnimationFrame(this.frame);for(const {type,handler} of this.listeners)this.canvas.removeEventListener(type,handler);this.listeners=[];this.motions.clear();this.effects=[];this.floats=[];}
+ private sound(name:'playClick'|'playSlash'|'playMagic'|'playHeal'|'playFanfare'){try{sounds[name]();}catch{/* Audio is optional. */}}
+ private now(){return performance.now();}
+ private unitAt(p:Point){return this.engine.alive.find(u=>u.gridX===p.x&&u.gridY===p.y);}
+ private cancelTimers(){this.generation++;for(const t of this.timers)clearTimeout(t);this.timers.clear();}
+ private later(fn:()=>void,ms:number){const generation=this.generation;const id=setTimeout(()=>{this.timers.delete(id);if(!this.destroyed&&generation===this.generation)fn();},ms);this.timers.add(id);}
+ private changed(){
+  this.onStateChange?.();
+  if(this.engine.status!=='active'&&!this.terminalHandled){this.terminalHandled=true;this.cancelTimers();const won=this.engine.status==='victory';if(won)this.sound('playFanfare');this.later(()=>{if(won)this.onVictory?.();else this.onDefeat?.();},650);}
+ }
+ private scheduleEnemies(){
+  const ids=this.engine.alive.filter(u=>!u.isPlayer).map(u=>u.id);
+  const step=(index:number)=>{if(!this.getIsEnemyTurn()||this.destroyed)return;if(index>=ids.length){this.transition(()=>this.engine.finishEnemyPhase());this.selectedSkill=this.getActiveUnit()?.skills[0]??null;this.actionMode='move';this.changed();return;}
+   const caster=this.engine.units.find(u=>u.id===ids[index]);const before=this.engine.log.length;this.transition(()=>this.engine.enemyStep(ids[index]),caster?.id,'attack');if(this.engine.log.length>before)this.sound('playSlash');this.changed();if(this.getIsEnemyTurn())this.later(()=>step(index+1),700);
+  };this.later(()=>step(0),500);
+ }
+ private setupEvents(){
+  const listen=(type:string,handler:EventListener)=>{this.canvas.addEventListener(type,handler);this.listeners.push({type,handler});};
+  const point=(e:PointerEvent)=>{this.layout();const r=this.canvas.getBoundingClientRect();return this.screenToGrid((e.clientX-r.left)*this.canvas.width/Math.max(1,r.width),(e.clientY-r.top)*this.canvas.height/Math.max(1,r.height));};
+  listen('pointermove',((event:PointerEvent)=>{const p=point(event);if(p.x===this.hoveredTile.x&&p.y===this.hoveredTile.y)return;this.hoveredTile=p;this.onStateChange?.();}) as EventListener);
+  listen('pointerleave',(()=>{this.hoveredTile={x:-1,y:-1};this.onStateChange?.();}) as EventListener);
+  listen('pointerdown',((event:PointerEvent)=>{
+   event.preventDefault();if(this.destroyed)return;this.hoveredTile=point(event);
+   if(this.engine.status!=='active'||this.getIsEnemyTurn()){this.engine.message=this.engine.status==='active'?'Wait for the enemy phase to finish.':'Battle complete — no further actions.';this.onStateChange?.();return;}
+   const target=this.unitAt(this.hoveredTile),caster=this.getActiveUnit();if(target)this.targetId=target.id;if(!caster)return;
+   if(this.actionMode==='move'){
+    const path=this.engine.path(caster,this.hoveredTile.x,this.hoveredTile.y,this.engine.moveRange(caster));let ok=false;
+    this.transition(()=>{ok=this.engine.move(this.hoveredTile.x,this.hoveredTile.y).ok;},undefined,undefined,path??undefined);
+    if(ok){this.actionMode='attack';this.sound('playClick');}
+   }else if(this.actionMode==='attack'||this.actionMode==='skill'){
+    const skill=this.actionMode==='skill'?this.selectedSkill??undefined:undefined;
+    if(this.actionMode==='skill'&&!skill)this.engine.result(false,'Select a known skill first.');
+    else {let ok=false;this.transition(()=>{ok=this.engine.act(target?.id??'',skill).ok;},caster.id,skill&&skill.element!=='physical'?'cast':'attack');if(ok)this.sound(skill?.type==='heal'||skill?.type==='buff'?'playHeal':skill&&skill.element!=='physical'?'playMagic':'playSlash');}
+   }this.changed();
+  }) as EventListener);
+  // Parent owns document-level hotkeys; no duplicate keyboard turn listener.
+ }
+ private transition(fn:()=>void,casterId?:string,kind:SpriteState='attack',playerPath?:Point[]){
+  const before=this.engine.units.map(u=>({id:u.id,hp:u.hp,x:u.gridX,y:u.gridY}));const start=this.now(),actionBefore=this.engine.lastAction;fn();
+  const action=this.engine.lastAction!==actionBefore?this.engine.lastAction:null;
+  if(action&&action.casterId===casterId)kind=action.skill&&action.skill.element!=='physical'?'cast':'attack';
+  for(const old of before){const u=this.engine.units.find(u=>u.id===old.id)!;const queue:Motion[]=[];
+   if(u.gridX!==old.x||u.gridY!==old.y)queue.push({kind:'move',start,duration:380,from:{x:old.x,y:old.y},path:playerPath??this.engine.lastPaths[u.id]??[{x:u.gridX,y:u.gridY}]});
+   if(u.hp!==old.hp){queue.push({kind:u.isDead?'death':u.hp<old.hp?'hurt':'cast',start:start+(queue.length?380:0),duration:u.isDead?850:480});this.floats.push({x:u.gridX,y:u.gridY,text:`${u.hp>old.hp?'+':''}${u.hp-old.hp} HP`,color:u.hp>old.hp?'#6ee7b7':'#fca5a5',start});
+    if(casterId&&u.id!==casterId){const caster=this.engine.units.find(v=>v.id===casterId);if(caster)this.effects.push({from:{x:caster.gridX,y:caster.gridY},to:{x:u.gridX,y:u.gridY},color:kind==='cast'?'#d8b4fe':'#fde68a',start,magic:kind==='cast'});}
+   }
+   if(u.id===casterId&&action?.casterId===casterId)queue.push({kind,start:start+(queue.length?380:0),duration:400});
+   if(queue.length)this.motions.set(u.id,queue);
   }
-
-  public getAllUnits(): Unit[] {
-    return this.units;
+ }
+ private layout(){
+  // Keep one logical canvas pixel per CSS pixel; stretching an 1100x640
+  // backing buffer into a tall mobile box distorts the board and every sprite.
+  if(this.canvas.clientWidth>0&&this.canvas.clientHeight>0){
+   if(this.canvas.width!==this.canvas.clientWidth)this.canvas.width=this.canvas.clientWidth;
+   if(this.canvas.height!==this.canvas.clientHeight)this.canvas.height=this.canvas.clientHeight;
   }
-
-  public getTargetUnit(): Unit | null {
-    return this.targetUnit || this.hoveredUnit;
+  const rows=this.engine.grid.length,cols=this.engine.grid[0]?.length??8;
+  this.tileW=Math.max(12,Math.min(104,(this.canvas.width-40)*2/(cols+rows),(this.canvas.height-142)*4/(cols+rows)));this.tileH=this.tileW/2;
+  this.originX=this.canvas.width/2-(cols-rows)*this.tileW/4;
+  this.originY=(this.canvas.height-(cols+rows)*this.tileH/2)/2+this.tileH/2+15;
+ }
+ private gridToScreen(x:number,y:number){return {x:this.originX+(x-y)*this.tileW/2,y:this.originY+(x+y)*this.tileH/2};}
+ private screenToGrid(x:number,y:number){const dx=(x-this.originX)/(this.tileW/2),dy=(y-this.originY)/(this.tileH/2);return {x:Math.round((dy+dx)/2),y:Math.round((dy-dx)/2)};}
+ private diamond(x:number,y:number,fill:string,stroke='#6b7890',offset=0){const p=this.gridToScreen(x,y),c=this.ctx;c.beginPath();c.moveTo(p.x,p.y-this.tileH/2-offset);c.lineTo(p.x+this.tileW/2,p.y-offset);c.lineTo(p.x,p.y+this.tileH/2-offset);c.lineTo(p.x-this.tileW/2,p.y-offset);c.closePath();c.fillStyle=fill;c.fill();c.strokeStyle=stroke;c.lineWidth=1;c.stroke();}
+ private drawTile(x:number,y:number,time:number){
+  const c=this.ctx,terrain=this.engine.grid[y][x],p=this.gridToScreen(x,y);
+  this.diamond(x,y,terrain===1?'#153c58':'#152135','#202e43',-9);
+  this.diamond(x,y,terrain===1?'#205676':terrain===2?'#697589':terrain===3?'#55457b':(x+y)%2?'#37465c':'#42526a',terrain===1?'#44748d':'#647089',terrain===2?24:0);
+  if(terrain===1){c.strokeStyle='#67a8bf';c.globalAlpha=.45;c.beginPath();const wave=Math.sin(time/600+x+y)*3;c.moveTo(p.x-10,p.y+wave);c.lineTo(p.x+10,p.y+wave);c.stroke();c.globalAlpha=1;}
+  if(terrain===2){c.fillStyle='#8590a0';c.fillRect(p.x-7,p.y-45,14,23);c.fillStyle='#adb4be';c.fillRect(p.x-11,p.y-49,22,6);}
+  if(terrain===3){c.strokeStyle='#b7a4ee';c.beginPath();c.ellipse(p.x,p.y,17,8,0,0,Math.PI*2);c.stroke();}
+  const active=this.getActiveUnit();if(this.engine.status==='active'&&this.engine.phase==='player'&&active){
+   if(this.actionMode==='move'&&!this.engine.action.moved&&this.engine.path(active,x,y,this.engine.moveRange(active))?.length)this.diamond(x,y,'rgba(45,175,221,.25)','#5cb6dc');
+   if((this.actionMode==='attack'||this.actionMode==='skill')&&!this.engine.action.acted){const u=this.unitAt({x,y});if(u&&!this.engine.validate(active,u,this.actionMode==='skill'?this.selectedSkill??undefined:undefined))this.diamond(x,y,'rgba(244,142,93,.35)','#fbbf7d');}
   }
-
-  public getTurnCount(): number {
-    return this.turnCount;
+  if(this.engine.telegraphs.some(w=>this.engine.alive.some(u=>u.id===w.casterId)&&w.tiles.some(v=>v.x===x&&v.y===y))){this.diamond(x,y,`rgba(239,68,68,${.28+Math.sin(time/160)*.12})`,'#ff6e80');c.fillStyle='#ffb7bd';c.font='bold 20px sans-serif';c.textAlign='center';c.fillText('!',p.x,p.y+5);}
+  if(this.hoveredTile.x===x&&this.hoveredTile.y===y)this.diamond(x,y,'rgba(255,231,180,.13)','#ffe1a0');
+ }
+ private drawUnit(u:Unit,time:number){
+  const queue=this.motions.get(u.id)??[];while(queue.length&&time>=queue[0].start+queue[0].duration)queue.shift();if(!queue.length)this.motions.delete(u.id);
+  const motion=queue[0],state=motion?.kind??'idle',progress=motion?Math.max(0,Math.min(1,(time-motion.start)/motion.duration)):0;
+  if(u.isDead&&state!=='death')return;let gx=u.gridX,gy=u.gridY;
+  if(state==='move'&&motion?.from&&motion.path?.length){const points=[motion.from,...motion.path],step=progress*(points.length-1),index=Math.min(points.length-2,Math.floor(step)),t=step-index;gx=points[index].x+(points[index+1].x-points[index].x)*t;gy=points[index].y+(points[index+1].y-points[index].y)*t;}
+  const p=this.gridToScreen(gx,gy),c=this.ctx,scale=Math.min(1.12,this.tileW/85);
+  c.beginPath();c.ellipse(p.x,p.y,17*scale,7*scale,0,0,Math.PI*2);c.fillStyle='rgba(5,10,20,.55)';c.fill();
+  if(u.id===this.getActiveUnit()?.id&&this.engine.phase==='player'&&this.engine.status==='active'){c.beginPath();c.ellipse(p.x,p.y,23*scale,11*scale,0,0,Math.PI*2);c.strokeStyle='#80dbef';c.lineWidth=2;c.stroke();}
+  if(u.id===this.getTargetUnit()?.id){c.beginPath();c.ellipse(p.x,p.y,26*scale,13*scale,0,0,Math.PI*2);c.strokeStyle='#f4be77';c.lineWidth=1.5;c.stroke();}
+  drawFighter(c,u,p.x,p.y,scale,time,state,progress,u.isPlayer?1:-1);
+  if(!u.isDead){const width=38*scale,top=p.y-87*scale;c.fillStyle='#0b1322';c.fillRect(p.x-width/2-1,top-1,width+2,6);c.fillStyle=u.isPlayer?'#65d5b1':'#ee8391';c.fillRect(p.x-width/2,top,width*Math.max(0,u.hp/u.maxHp),4);c.font=`${Math.max(9,10*scale)}px sans-serif`;c.textAlign='center';c.fillStyle='#e1e5ed';c.fillText(u.name.split(' ')[0],p.x,top-5);
+   const status=(this.engine.effects[u.id]??[]).map(e=>`${e.id.toUpperCase()} ${e.turns}`).join(' · ');if(status){c.fillStyle='#d2b3ef';c.font='9px sans-serif';c.fillText(status,p.x,p.y+17);}
   }
-
-  public getIsEnemyTurn(): boolean {
-    return this.isEnemyTurn;
+ }
+ private animate=()=>{
+  if(this.destroyed)return;this.layout();const c=this.ctx,time=this.now(),width=this.canvas.width,height=this.canvas.height;
+  c.clearRect(0,0,width,height);c.fillStyle='#101a2b';c.fillRect(0,0,width,height);
+  const gradient=c.createLinearGradient(0,0,width,height);gradient.addColorStop(0,'#1d2c40');gradient.addColorStop(1,'#111827');c.fillStyle=gradient;c.fillRect(0,0,width,height);
+  for(let y=0;y<this.engine.grid.length;y++)for(let x=0;x<this.engine.grid[y].length;x++)this.drawTile(x,y,time);
+  const u=this.getActiveUnit();if(u&&this.actionMode==='move'&&!this.engine.action.moved&&this.engine.phase==='player'){
+   const path=this.engine.path(u,this.hoveredTile.x,this.hoveredTile.y,this.engine.moveRange(u));if(path?.length){c.beginPath();const p=this.gridToScreen(u.gridX,u.gridY);c.moveTo(p.x,p.y);for(const step of path){const p=this.gridToScreen(step.x,step.y);c.lineTo(p.x,p.y);}c.strokeStyle='#a8e4ef';c.lineWidth=3;c.stroke();}
   }
-
-  public setMode(mode: 'move' | 'attack' | 'skill' | 'idle', skill?: Skill) {
-    this.actionMode = mode;
-    if (skill) {
-      this.selectedSkill = skill;
-    }
-    sounds.playClick();
-    this.onStateChange?.();
-  }
-
-  public getSelectedSkill(): Skill | null {
-    return this.selectedSkill;
-  }
-
-  public getActionMode(): string {
-    return this.actionMode;
-  }
-
-  public resetBattle(newUnits: Unit[]) {
-    this.units = JSON.parse(JSON.stringify(newUnits));
-    this.activeUnitIndex = 0;
-    this.turnCount = 1;
-    this.isEnemyTurn = false;
-    this.targetUnit = null;
-    this.actionMode = 'move';
-    this.selectedSkill = this.getActiveUnit()?.skills[0] || null;
-    this.onStateChange?.();
-  }
-
-  private gridToScreen(gx: number, gy: number, elevation = 0) {
-    const sx = this.originX + (gx - gy) * (this.TILE_W / 2);
-    const sy = this.originY + (gx + gy) * (this.TILE_H / 2) - elevation;
-    return { x: sx, y: sy };
-  }
-
-  private screenToGrid(sx: number, sy: number) {
-    const dx = sx - this.originX;
-    const dy = sy - this.originY;
-    const gx = (dy / (this.TILE_H / 2) + dx / (this.TILE_W / 2)) / 2;
-    const gy = (dy / (this.TILE_H / 2) - dx / (this.TILE_W / 2)) / 2;
-    return { x: Math.floor(gx), y: Math.floor(gy) };
-  }
-
-  private inMoveRange(gx: number, gy: number): boolean {
-    const active = this.getActiveUnit();
-    if (!active || this.isEnemyTurn || active.isDead) return false;
-    const dist = Math.abs(active.gridX - gx) + Math.abs(active.gridY - gy);
-    const isOccupied = this.units.some(u => !u.isDead && u.gridX === gx && u.gridY === gy);
-    return dist <= 2 && dist > 0 && this.mapGrid[gy]?.[gx] !== 1 && this.mapGrid[gy]?.[gx] !== 2 && !isOccupied;
-  }
-
-  private inActionRange(gx: number, gy: number): boolean {
-    const active = this.getActiveUnit();
-    if (!active || this.isEnemyTurn || active.isDead) return false;
-    const range = this.selectedSkill ? this.selectedSkill.range : 1;
-    const dist = Math.abs(active.gridX - gx) + Math.abs(active.gridY - gy);
-    return dist <= range && dist > 0;
-  }
-
-  private setupEvents() {
-    this.canvas.addEventListener('mousemove', (e) => {
-      const rect = this.canvas.getBoundingClientRect();
-      const scaleX = this.canvas.width / rect.width;
-      const scaleY = this.canvas.height / rect.height;
-      const mx = (e.clientX - rect.left) * scaleX;
-      const my = (e.clientY - rect.top) * scaleY;
-
-      const g = this.screenToGrid(mx, my);
-      if (g.x >= 0 && g.x < this.GRID_SIZE && g.y >= 0 && g.y < this.GRID_SIZE) {
-        this.hoveredTile = g;
-        this.hoveredUnit = this.units.find(u => !u.isDead && u.gridX === g.x && u.gridY === g.y) || null;
-      } else {
-        this.hoveredTile = { x: -1, y: -1 };
-        this.hoveredUnit = null;
-      }
-      this.onStateChange?.();
-    });
-
-    this.canvas.addEventListener('click', () => {
-      if (this.isEnemyTurn || this.hoveredTile.x === -1) return;
-      const active = this.getActiveUnit();
-      if (!active || active.isDead) return;
-
-      const hx = this.hoveredTile.x;
-      const hy = this.hoveredTile.y;
-      const clickedUnit = this.units.find(u => !u.isDead && u.gridX === hx && u.gridY === hy);
-
-      if (clickedUnit) {
-        this.targetUnit = clickedUnit;
-        this.onStateChange?.();
-      }
-
-      // Movement
-      if (this.actionMode === 'move' && this.inMoveRange(hx, hy)) {
-        active.gridX = hx;
-        active.gridY = hy;
-        sounds.playClick();
-        this.spawnDamageText(hx, hy, 'Moved!', '#38bdf8');
-        this.actionMode = 'attack';
-        this.onStateChange?.();
-        return;
-      }
-
-      // Skill or Attack
-      if ((this.actionMode === 'attack' || this.actionMode === 'skill') && this.inActionRange(hx, hy)) {
-        if (clickedUnit) {
-          this.executeSkillOnUnit(active, clickedUnit);
-        }
-      }
-    });
-  }
-
-  private executeSkillOnUnit(caster: Unit, target: Unit) {
-    const skill = this.selectedSkill || caster.skills[0];
-    if (caster.mp < skill.mpCost) {
-      const pos = this.gridToScreen(caster.gridX, caster.gridY);
-      this.floatingTexts.push({ x: pos.x, y: pos.y - 30, text: 'No MP!', color: '#94a3b8', alpha: 1 });
-      return;
-    }
-
-    caster.mp -= skill.mpCost;
-
-    if (skill.type === 'damage') {
-      if (target.isPlayer) return; // Don't hurt allies
-      sounds.playSlash();
-      if (skill.element !== 'physical') sounds.playMagic();
-
-      const rawDmg = Math.max(10, caster.atk + skill.power - target.def);
-      const isCrit = Math.random() < 0.25;
-      const finalDmg = isCrit ? Math.floor(rawDmg * 1.5) : rawDmg;
-
-      target.hp = Math.max(0, target.hp - finalDmg);
-      const tPos = this.gridToScreen(target.gridX, target.gridY);
-      this.floatingTexts.push({
-        x: tPos.x,
-        y: tPos.y - 45,
-        text: isCrit ? `CRIT! -${finalDmg}` : `-${finalDmg}`,
-        color: isCrit ? '#f59e0b' : '#ef4444',
-        alpha: 1
-      });
-
-      if (target.hp <= 0) {
-        target.isDead = true;
-        this.floatingTexts.push({ x: tPos.x, y: tPos.y - 65, text: 'Defeated!', color: '#cbd5e1', alpha: 1 });
-        this.checkVictory();
-      }
-    } else if (skill.type === 'heal') {
-      sounds.playHeal();
-      const healAmt = skill.power + Math.floor(caster.matk * 0.8);
-      target.hp = Math.min(target.maxHp, target.hp + healAmt);
-      const tPos = this.gridToScreen(target.gridX, target.gridY);
-      this.floatingTexts.push({ x: tPos.x, y: tPos.y - 45, text: `+${healAmt} HP`, color: '#10b981', alpha: 1 });
-    } else if (skill.type === 'buff') {
-      sounds.playHeal();
-      target.def += skill.power;
-      const tPos = this.gridToScreen(target.gridX, target.gridY);
-      this.floatingTexts.push({ x: tPos.x, y: tPos.y - 45, text: `DEF +${skill.power}`, color: '#38bdf8', alpha: 1 });
-    }
-
-    this.onStateChange?.();
-  }
-
-  public endTurn() {
-    if (this.isEnemyTurn) return;
-    sounds.playClick();
-
-    // Check if next player unit exists
-    const livingPlayers = this.units.filter(u => !u.isDead && u.isPlayer);
-    if (this.activeUnitIndex < livingPlayers.length - 1) {
-      this.activeUnitIndex++;
-      this.actionMode = 'move';
-      this.selectedSkill = this.getActiveUnit()?.skills[0] || null;
-      this.onStateChange?.();
-      return;
-    }
-
-    // Otherwise, Enemy Phase
-    this.isEnemyTurn = true;
-    this.onStateChange?.();
-
-    setTimeout(() => {
-      this.runEnemyTurn();
-    }, 800);
-  }
-
-  private runEnemyTurn() {
-    const livingEnemies = this.units.filter(u => !u.isDead && !u.isPlayer);
-    const livingPlayers = this.units.filter(u => !u.isDead && u.isPlayer);
-
-    livingEnemies.forEach((enemy, idx) => {
-      setTimeout(() => {
-        if (enemy.isDead || livingPlayers.length === 0) return;
-
-        // Find nearest heroine
-        let nearestHero = livingPlayers[0];
-        let minDist = 999;
-        livingPlayers.forEach(hero => {
-          const d = Math.abs(hero.gridX - enemy.gridX) + Math.abs(hero.gridY - enemy.gridY);
-          if (d < minDist) {
-            minDist = d;
-            nearestHero = hero;
-          }
-        });
-
-        // Step closer if not adjacent
-        if (minDist > 1) {
-          const stepX = enemy.gridX > nearestHero.gridX ? -1 : (enemy.gridX < nearestHero.gridX ? 1 : 0);
-          const stepY = enemy.gridY > nearestHero.gridY ? -1 : (enemy.gridY < nearestHero.gridY ? 1 : 0);
-
-          const targetX = enemy.gridX + (Math.abs(enemy.gridX - nearestHero.gridX) >= Math.abs(enemy.gridY - nearestHero.gridY) ? stepX : 0);
-          const targetY = enemy.gridY + (Math.abs(enemy.gridX - nearestHero.gridX) < Math.abs(enemy.gridY - nearestHero.gridY) ? stepY : 0);
-
-          const occupied = this.units.some(u => !u.isDead && u.gridX === targetX && u.gridY === targetY);
-          if (!occupied && this.mapGrid[targetY]?.[targetX] === 0) {
-            enemy.gridX = targetX;
-            enemy.gridY = targetY;
-          }
-        }
-
-        // Attack if within reach 1
-        const curDist = Math.abs(enemy.gridX - nearestHero.gridX) + Math.abs(enemy.gridY - nearestHero.gridY);
-        if (curDist <= 1) {
-          sounds.playSlash();
-          const dmg = Math.max(8, enemy.atk + 10 - nearestHero.def);
-          nearestHero.hp = Math.max(0, nearestHero.hp - dmg);
-          const hPos = this.gridToScreen(nearestHero.gridX, nearestHero.gridY);
-          this.floatingTexts.push({ x: hPos.x, y: hPos.y - 45, text: `-${dmg}`, color: '#ef4444', alpha: 1 });
-
-          if (nearestHero.hp <= 0) {
-            nearestHero.isDead = true;
-          }
-        }
-      }, idx * 600);
-    });
-
-    setTimeout(() => {
-      // Restore turn to players
-      this.isEnemyTurn = false;
-      this.turnCount++;
-      this.activeUnitIndex = 0;
-      this.actionMode = 'move';
-      this.selectedSkill = this.getActiveUnit()?.skills[0] || null;
-
-      // Small MP regeneration
-      this.units.filter(u => !u.isDead && u.isPlayer).forEach(p => {
-        p.mp = Math.min(p.maxMp, p.mp + 4);
-      });
-
-      this.onStateChange?.();
-    }, livingEnemies.length * 600 + 400);
-  }
-
-  private checkVictory() {
-    const enemies = this.units.filter(u => !u.isDead && !u.isPlayer);
-    if (enemies.length === 0) {
-      sounds.playFanfare();
-      setTimeout(() => {
-        this.onVictory?.();
-      }, 500);
-    }
-  }
-
-  private spawnDamageText(gx: number, gy: number, text: string, color: string) {
-    const pos = this.gridToScreen(gx, gy);
-    this.floatingTexts.push({ x: pos.x, y: pos.y - 35, text, color, alpha: 1 });
-  }
-
-  private drawTile(gx: number, gy: number) {
-    const type = this.mapGrid[gy][gx];
-    const isPillar = type === 2;
-    const isWater = type === 1;
-    const isSeal = type === 3;
-    const height = isPillar ? 24 : 8;
-
-    const pos = this.gridToScreen(gx, gy);
-    const topY = pos.y - (isPillar ? 24 : 0);
-
-    // Block side faces (Isometric depth)
-    if (!isWater) {
-      // Left Face
-      this.ctx.fillStyle = isPillar ? '#475569' : '#263345';
-      this.ctx.beginPath();
-      this.ctx.moveTo(pos.x - this.TILE_W / 2, topY);
-      this.ctx.lineTo(pos.x, topY + this.TILE_H / 2);
-      this.ctx.lineTo(pos.x, topY + this.TILE_H / 2 + height);
-      this.ctx.lineTo(pos.x - this.TILE_W / 2, topY + height);
-      this.ctx.closePath();
-      this.ctx.fill();
-
-      // Right Face
-      this.ctx.fillStyle = isPillar ? '#334155' : '#1c2635';
-      this.ctx.beginPath();
-      this.ctx.moveTo(pos.x, topY + this.TILE_H / 2);
-      this.ctx.lineTo(pos.x + this.TILE_W / 2, topY);
-      this.ctx.lineTo(pos.x + this.TILE_W / 2, topY + height);
-      this.ctx.lineTo(pos.x, topY + this.TILE_H / 2 + height);
-      this.ctx.closePath();
-      this.ctx.fill();
-    }
-
-    // Top diamond face
-    this.ctx.beginPath();
-    this.ctx.moveTo(pos.x, topY - this.TILE_H / 2);
-    this.ctx.lineTo(pos.x + this.TILE_W / 2, topY);
-    this.ctx.lineTo(pos.x, topY + this.TILE_H / 2);
-    this.ctx.lineTo(pos.x - this.TILE_W / 2, topY);
-    this.ctx.closePath();
-
-    if (isPillar) {
-      this.ctx.fillStyle = '#64748b';
-    } else if (isWater) {
-      this.ctx.fillStyle = '#0284c7';
-    } else if (isSeal) {
-      this.ctx.fillStyle = '#8b5cf6';
-    } else {
-      // Crisp checkered stone tiles with light reflections
-      this.ctx.fillStyle = (gx + gy) % 2 === 0 ? '#44536b' : '#39465b';
-    }
-    this.ctx.fill();
-
-    // Subtle edge highlight
-    this.ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
-    this.ctx.lineWidth = 1;
-    this.ctx.stroke();
-
-    // Movement Range Highlight (Blue diamond)
-    if (this.actionMode === 'move' && this.inMoveRange(gx, gy)) {
-      this.ctx.fillStyle = 'rgba(56, 189, 248, 0.45)';
-      this.ctx.fill();
-      this.ctx.strokeStyle = '#38bdf8';
-      this.ctx.lineWidth = 2;
-      this.ctx.stroke();
-    }
-
-    // Action / Skill Range Highlight (Red diamond)
-    if ((this.actionMode === 'attack' || this.actionMode === 'skill') && this.inActionRange(gx, gy)) {
-      this.ctx.fillStyle = 'rgba(239, 68, 68, 0.4)';
-      this.ctx.fill();
-      this.ctx.strokeStyle = '#f87171';
-      this.ctx.lineWidth = 2;
-      this.ctx.stroke();
-    }
-
-    // Hover wireframe
-    if (this.hoveredTile.x === gx && this.hoveredTile.y === gy) {
-      this.ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
-      this.ctx.fill();
-      this.ctx.strokeStyle = '#f59e0b';
-      this.ctx.lineWidth = 2;
-      this.ctx.stroke();
-    }
-  }
-
-  private drawUnit(unit: Unit) {
-    if (unit.isDead) return;
-
-    const isPillar = this.mapGrid[unit.gridY][unit.gridX] === 2;
-    const elev = isPillar ? 24 : 0;
-    const pos = this.gridToScreen(unit.gridX, unit.gridY, elev);
-
-    // Oval base shadow
-    this.ctx.beginPath();
-    this.ctx.ellipse(pos.x, pos.y, 16, 8, 0, 0, Math.PI * 2);
-    this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
-    this.ctx.fill();
-
-    const charY = pos.y - 22;
-
-    // Active unit glowing halo ring
-    const active = this.getActiveUnit();
-    if (active && active.id === unit.id && !this.isEnemyTurn) {
-      this.ctx.beginPath();
-      this.ctx.ellipse(pos.x, pos.y, 22, 11, 0, 0, Math.PI * 2);
-      this.ctx.strokeStyle = '#38bdf8';
-      this.ctx.lineWidth = 2.5;
-      this.ctx.stroke();
-    }
-
-    // 2.5D Chibi Token
-    this.ctx.beginPath();
-    this.ctx.arc(pos.x, charY, 18, 0, Math.PI * 2);
-    this.ctx.fillStyle = unit.color;
-    this.ctx.fill();
-    this.ctx.strokeStyle = unit.isPlayer ? '#93c5fd' : '#fca5a5';
-    this.ctx.lineWidth = 2.5;
-    this.ctx.stroke();
-
-    // Emblem or Icon inside token
-    this.ctx.font = '16px "Segoe UI Emoji", sans-serif';
-    this.ctx.textAlign = 'center';
-    this.ctx.textBaseline = 'middle';
-    const icon = unit.isPlayer ? (unit.id === 'arza' ? '⚔️' : unit.id === 'lyria' ? '✨' : '🏹') : (unit.id.includes('goblin') ? '🗡️' : '🔮');
-    this.ctx.fillText(icon, pos.x, charY + 1);
-
-    // Miniature HP Bar above head
-    const barW = 34;
-    const barH = 5;
-    const barX = pos.x - barW / 2;
-    const barY = charY - 26;
-
-    this.ctx.fillStyle = 'rgba(0,0,0,0.8)';
-    this.ctx.fillRect(barX - 1, barY - 1, barW + 2, barH + 2);
-
-    const pct = Math.max(0, unit.hp / unit.maxHp);
-    this.ctx.fillStyle = unit.isPlayer ? '#10b981' : '#ef4444';
-    this.ctx.fillRect(barX, barY, barW * pct, barH);
-  }
-
-  private animate = () => {
-    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-
-    // Render tiles and units in Isometric painter order
-    for (let y = 0; y < this.GRID_SIZE; y++) {
-      for (let x = 0; x < this.GRID_SIZE; x++) {
-        this.drawTile(x, y);
-
-        const unitOnTile = this.units.find(u => !u.isDead && u.gridX === x && u.gridY === y);
-        if (unitOnTile) {
-          this.drawUnit(unitOnTile);
-        }
-      }
-    }
-
-    // Floating text render & update
-    for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
-      const ft = this.floatingTexts[i];
-      this.ctx.font = 'bold 16px "Segoe UI", sans-serif';
-      this.ctx.fillStyle = ft.color;
-      this.ctx.textAlign = 'center';
-      this.ctx.fillText(ft.text, ft.x, ft.y);
-      ft.y -= 0.7;
-      ft.alpha -= 0.02;
-      if (ft.alpha <= 0) {
-        this.floatingTexts.splice(i, 1);
-      }
-    }
-
-    requestAnimationFrame(this.animate);
-  };
+  // Environment pass then dedicated character pass: no pillar can cover a heroine.
+  for(const unit of this.engine.units.slice().sort((a,b)=>a.gridX+a.gridY-b.gridX-b.gridY))this.drawUnit(unit,time);
+  this.effects=this.effects.filter(e=>time-e.start<500);for(const effect of this.effects){const t=(time-effect.start)/500,from=this.gridToScreen(effect.from.x,effect.from.y),to=this.gridToScreen(effect.to.x,effect.to.y);c.save();c.globalAlpha=1-t;c.strokeStyle=effect.color;c.lineWidth=effect.magic?5:3;c.beginPath();if(effect.magic){c.moveTo(from.x,from.y-35);c.lineTo(from.x+(to.x-from.x)*Math.min(1,t*3),from.y-35+(to.y-from.y)*Math.min(1,t*3));}else c.arc(to.x,to.y-25,24,-Math.PI*.8+t,Math.PI*.2+t);c.stroke();for(let i=0;i<6;i++){const angle=i*Math.PI/3+t*4;c.fillStyle=effect.color;c.fillRect(to.x+Math.cos(angle)*t*38,to.y-25+Math.sin(angle)*t*30,3,3);}c.restore();}
+  this.floats=this.floats.filter(f=>time-f.start<1100);for(const f of this.floats){const t=(time-f.start)/1100,p=this.gridToScreen(f.x,f.y);c.globalAlpha=1-t;c.fillStyle=f.color;c.font='bold 17px sans-serif';c.textAlign='center';c.fillText(f.text,p.x,p.y-65-t*32);}c.globalAlpha=1;
+  // The parent DOM HUD owns status, previews and feedback (avoids overprinting its title).
+  this.frame=requestAnimationFrame(this.animate);
+ };
 }
+
